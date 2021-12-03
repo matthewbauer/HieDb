@@ -263,7 +263,7 @@ addRefsFromLoaded_unsafe
 
   execute conn "INSERT INTO mods VALUES (?,?,?,?,?,?,?)" modrow
 
-  let (rows,decls) = genRefsAndDecls path smod refmap
+  let (rows,decls) = genRefsAndDecls path smod refmap (hie_asts hf)
   executeMany conn "INSERT INTO refs  VALUES (?,?,?,?,?,?,?,?)" rows
   executeMany conn "INSERT INTO decls VALUES (?,?,?,?,?,?,?)" decls
 

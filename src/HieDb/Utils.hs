@@ -18,6 +18,7 @@ import Compat.HieTypes
 import qualified Compat.HieTypes as HieTypes
 import Compat.HieUtils
 import qualified Data.Map as M
+import qualified Data.Set as S
 
 
 import System.Directory
@@ -34,6 +35,7 @@ import Data.Int
 import Data.Maybe
 import Data.Monoid
 import Data.IORef
+import qualified Data.Tree as Tree
 
 import HieDb.Types
 import HieDb.Compat
@@ -149,30 +151,38 @@ isCons (':':_) = True
 isCons (x:_) | isUpper x = True
 isCons _ = False
 
-genRefsAndDecls :: FilePath -> Module -> M.Map Identifier [(Span, IdentifierDetails a)] -> ([RefRow],[DeclRow])
-genRefsAndDecls path smdl refmap = genRows $ flat $ M.toList refmap
+genRefsAndDecls :: FilePath -> Module -> M.Map Identifier [(Span, IdentifierDetails a)] -> HieASTs a -> ([RefRow],[DeclRow])
+genRefsAndDecls path smdl refmap asts = genRows $ flat $ M.toList refmap
   where
     flat = concatMap (\(a,xs) -> map (a,) xs)
     genRows = foldMap go
-    go = bimap maybeToList maybeToList . (goRef &&& goDec)
+    go = bimap id maybeToList . (goRef &&& goDec)
 
-    goRef (Right name, (sp,_))
-      | Just mod <- nameModule_maybe name = Just $
-          RefRow path occ (moduleName mod) (moduleUnit mod) sl sc el ec
-          where
-            occ = nameOccName name
-            sl = srcSpanStartLine sp
-            sc = srcSpanStartCol sp
-            el = srcSpanEndLine sp
-            ec = srcSpanEndCol sp
-    goRef _ = Nothing
+    goRef (Right name, (sp,dets))
+      | Just mod <- nameModule_maybe name = [ RefRow path occ (moduleName mod) (moduleUnit mod) sl sc el ec ]
+      | any isEvidenceUse (identInfo dets)
+      , Just ev_tree <- getEvidenceTree refmap name
+      = Tree.foldTree goLeaves ev_tree
+      where
+        occ = nameOccName name
+        sl = srcSpanStartLine sp
+        sc = srcSpanStartCol sp
+        el = srcSpanEndLine sp
+        ec = srcSpanEndCol sp
 
-    goDec (Right name,(_,dets))
+        goLeaves (evidenceVar -> name) []
+          | Just mod <- nameModule_maybe name
+          , occ <- nameOccName name
+          = [ RefRow path occ (moduleName mod) (moduleUnit mod) sl sc el ec ]
+        goLeaves _    children = concat children
+    goRef _ = []
+
+    goDec (Right name,(sp,dets))
       | Just mod <- nameModule_maybe name
       , mod == smdl
       , occ  <- nameOccName name
       , info <- identInfo dets
-      , Just sp <- getBindSpan info
+      , Just sp <- getBindSpan sp info
       , is_root <- isRoot info
       , sl   <- srcSpanStartLine sp
       , sc   <- srcSpanStartCol sp
@@ -186,12 +196,19 @@ genRefsAndDecls path smdl refmap = genRows $ flat $ M.toList refmap
       Decl _ _ -> True
       _ -> False)
 
-    getBindSpan = getFirst . foldMap (First . goDecl)
-    goDecl (ValBind _ _ sp) = sp
-    goDecl (PatternBind _ _ sp) = sp
-    goDecl (Decl _ sp) = sp
-    goDecl (RecField _ sp) = sp
-    goDecl _ = Nothing
+    getBindSpan sp = getFirst . foldMap (First . goDecl sp)
+    goDecl _ (ValBind RegularBind _ sp) = sp
+    goDecl _ (PatternBind _ _ sp) = sp
+    -- goDecl _ (Decl _ sp) = sp
+    goDecl _ (RecField _ sp) = sp
+    goDecl sp (EvidenceVarBind EvInstBind{} _ _)
+      | Just rsp <- nodeSpan <$> (smallestContainingSatisfying sp isClsInst =<< ast)
+      = Just rsp
+      where
+        isClsInst node = (fsLit "ClsInstD", fsLit "InstDecl") `S.member`
+                            S.unions (M.map nodeAnnotations $ getSourcedNodeInfo $ sourcedNodeInfo node)
+        ast = M.lookup (srcSpanFile sp) (getAsts asts)
+    goDecl _ _ = Nothing
 
 genDefRow :: FilePath -> Module -> M.Map Identifier [(Span, IdentifierDetails a)] -> [DefRow]
 genDefRow path smod refmap = genRows $ M.toList refmap
